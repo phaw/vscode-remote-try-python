@@ -1,54 +1,93 @@
-#!/usr/bin/python
-# -*- coding: UTF-8 -*-# enable debugging
 from shapely.geometry import Polygon, LineString
 from shapely.ops import transform
-import cgi, cgitb, sys, json
 import mygeolib
 import pyproj
 from functools import partial
-import os
-import sys
-
-
 from datetime import timedelta
 from datetime import datetime
 from datetime import date
-
-import logging
-import logging.handlers
-
-logger = logging.getLogger('MyLogger')
-logger.setLevel(logging.DEBUG)
-handler = logging.handlers.SysLogHandler(address = '/dev/log')
-logger.addHandler(handler)
-
-cgitb.enable(display=0, logdir="/var/log")
 
 project = partial(
     pyproj.transform,
     pyproj.Proj(init='epsg:4326'),
     pyproj.Proj('+proj=merc +a=6378137 +b=6378137 +lat_ts=0.0 +lon_0=0.0 +x_0=0.0 +y_0=0 +k=1.0 +units=m +nadgrids=@null +no_defs'))
 
-print("Content-type: application/json;charset=utf-8\n\n")
+def price(myjson, citytxt, param):
+    first_km = param.get('first_km', 1)
+    price_start = param.get('price_start', 0)
+    price_1km = param.get('price_1km', 0)
+    discount = param.get('discount', 0)
+    zam = param.get('zam', 0)
+    holiday_mul = param.get('holiday_mul', 1.5)
+    city_center = param.get('city_center', 0)
+    kwota_za_kurs_minus = param.get('kwota_za_kurs_minus', 0)
+    kwota_za_kurs_plus = param.get('kwota_za_kurs_plus', 0)
+    price_1km_out = param.get('price_1km_out', 0)
+    promo1_km = param.get('promo1_km', 0)
 
-#w = '';
-#try:
-#    w = sys.stdin.readlines()
-#except:
-#    print(json.JSONEncoder().encode({ 'distance': 'no stdin', 'cena1': '<b></b>', 'cena2': '<b></b>' }))
-#    quit()
-#
-#print(json.JSONEncoder().encode({ 'stdin': w }))
-#quit()
+    path = mygeolib.decode_polyline(myjson["poly"])
+    theDate = datetime.strptime(myjson["time"], "%Y-%m-%d %H:%M")
+    path_line = transform(project, LineString(path))
 
-#std_input = sys.stdin.readlines()
+    city = mygeolib.decode_polyline(citytxt)
+    city_polygon = transform(project, Polygon(city))
 
-try:
-#    logger.debug('PRICE stdin:'+sys.stdin)
-    myjson = json.load(sys.stdin)
-except:
-    print(json.JSONEncoder().encode({ 'distance': '', 'cena1': '<b></b>', 'cena2': '<b></b>' }))
-    quit()
+    city_in = path_line.intersection(city_polygon)
+    city_out = path_line.difference(city_polygon)
+
+    korekta = (0.616 / 1000)
+    in_length = city_in.length * korekta
+    out_length = city_out.length * korekta
+
+    if city_in.length == 0:
+        dojazd_line = transform(project, LineString([city_center, path[0]]))
+        dojazd_out = dojazd_line.difference(city_polygon)
+        out_length += dojazd_out.length * korekta
+
+    all_length = in_length + out_length
+
+    response = {}
+    response['zam'] = zam
+    response['all_length'] = "{0:.1f}".format(all_length)
+    dist = "dystans {0:.1f} km".format(all_length)
+    if city_out.length > 0:
+        dist += "  (w tym 2 strefa {0:.1f} km)".format(out_length)
+
+    if promo1_km > 0 and promo1_km < all_length:
+        promo1_price = param.get('promo1_price', 3.00)
+        cena = promo1_price * all_length
+        dist += "<br><b>promo1</b>"
+    else:
+        cena = price_start
+        in_length -= first_km
+        if in_length < 0:
+            out_length += in_length
+            in_length = 0
+            if out_length < 0:
+                out_length = 0
+        cena += in_length * price_1km + out_length * price_1km_out
+        dayoff = IsDayOffIsDayOff( theDate )
+        if dayoff:
+            cena = cena * holiday_mul
+            dist += "<br><b>taryfa noc/święta</b>"
+    #    logger.debug('PRICE cena:{0:.2f} holiday:{1}'.format(cena, dayoff))
+
+    response['distance'] = dist
+    response['cena'] = '{0:.0f}'.format(cena) # to pole dla mTaxiZ tylko
+    cena_d = cena * discount
+    # ponisze pola sa tylko dla strony ZAM
+    if city_in.length > 0:
+        if kwota_za_kurs_minus and kwota_za_kurs_plus:
+            response['cena1'] = 'cena od <b>{0:.0f}</b> do <b>{1:.0f}</b> zł'.format(cena * kwota_za_kurs_minus / 100, cena * kwota_za_kurs_plus / 100)
+            response['cena2'] = 'cena od <b>{0:.0f}</b> do <b>{1:.0f}</b> zł'.format(cena_d * kwota_za_kurs_minus / 100, cena_d * kwota_za_kurs_plus / 100)
+        else:
+            response['cena1'] = 'cena około <b>{0:.0f}</b> zł'.format(cena)
+            response['cena2'] = 'cena około <b>{0:.0f}</b> zł'.format(cena_d)
+    else:
+        response['cena1'] = '<b>Kursu nie można zrealizować całkowicie poza granicami miasta !</b>'
+        response['cena2'] = '<b>Kursu nie można zrealizować całkowicie poza granicami miasta !</b>'
+
+    return response
 
 def IsDayOffIsDayOff( theDate ):
     if theDate.hour >= 22 or theDate.hour < 6: return True # Noc
@@ -78,105 +117,3 @@ def IsDayOffIsDayOff( theDate ):
     if (theDate + timedelta(days=-60)) == easter: return True #Boze Cialo
     return False
 
-#date = datetime.strptime(myjson["time"], '%Y-%m-%d %H:%M:%S')
-path = mygeolib.decode_polyline(myjson["poly"])
-theDate = datetime.strptime(myjson["time"], "%Y-%m-%d %H:%M")
-path_line = transform(project, LineString(path))
-
-host = os.environ["SERVER_NAME"]
-if host == 'service.altsoft.pl':
-    host = { 'BYZT':"byzt.mtaxi.eu", 
-             'POZTP': "zam.altsoft.pl", 
-             'POCLUB': "rtcclub.altsoft.pl", 
-             'BYMPT': "5219191.mtaxi.eu", 
-             'BIOK2': "ok.mtaxi.eu",
-             'BYKOMFORT': "komfort.mtaxi.eu",
-             'XXX': "byzt.mtaxi.eu" }.get(myjson["corp"])
-    if host is None:
-        host = "byzt.mtaxi.eu"
-#    logger.debug('PRICE time:' + myjson["time"] + ' service.altsoft.pl corp:' + myjson["corp"] + ' -> host:' + host)
-#else:
-#    logger.debug('PRICE time:' + myjson["time"] + ' host:' + host)
-
-scriptpath = '../{0}/param.py'.format(host)
-execfile(scriptpath)
-#sys.path.append(os.path.abspath(scriptpath))
-#import param
-
-citytxt = open('../{0}/city.txt'.format(host), 'rb').read().rstrip()
-city = mygeolib.decode_polyline(citytxt)
-city_polygon = transform(project, Polygon(city))
-
-city_in = path_line.intersection(city_polygon)
-city_out = path_line.difference(city_polygon)
-
-korekta = (0.616 / 1000)
-in_length = city_in.length * korekta
-out_length = city_out.length * korekta
-#all_length = path_line.length * korekta
-
-if city_in.length == 0 and 'city_center' in globals():
-    dojazd_line = transform(project, LineString([city_center, path[0]]))
-    dojazd_out = dojazd_line.difference(city_polygon)
-    out_length += dojazd_out.length * korekta
-
-all_length = in_length + out_length
-
-response = {}
-response['zam'] = zam
-response['all_length'] = "{0:.1f}".format(all_length)
-dist = "dystans {0:.1f} km".format(all_length)
-if city_out.length > 0:
-    dist += "  (w tym 2 strefa {0:.1f} km)".format(out_length)
-
-if 'promo1_km' not in globals():
-    promo1_km = 0
-if 'first_km' not in globals():
-    first_km = 1
-if 'holiday_mul' not in globals():
-    holiday_mul = 1.5
-if 'kwota_za_kurs_minus' not in globals():
-    kwota_za_kurs_minus = 0
-if 'kwota_za_kurs_plus' not in globals():
-    kwota_za_kurs_plus = 0
-
-if promo1_km > 0 and promo1_km < all_length:
-    cena = promo1_price * all_length
-    dist += "<br><b>promo1</b>"
-else:
-    cena = price_start
-    in_length -= first_km
-    if in_length < 0:
-        out_length += in_length
-        in_length = 0
-        if out_length < 0:
-            out_length = 0
-    cena += in_length * price_1km + out_length * price_1km_out
-    dayoff = IsDayOffIsDayOff( theDate )
-    if dayoff:
-        cena = cena * holiday_mul
-        dist += "<br><b>taryfa noc/święta</b>"
-#    logger.debug('PRICE cena:{0:.2f} holiday:{1}'.format(cena, dayoff))
-
-response['distance'] = dist
-response['cena'] = '{0:.0f}'.format(cena) # to pole dla mTaxiZ tylko
-cena_d = cena * discount
-# ponisze pola sa tylko dla strony ZAM
-if city_in.length > 0:
-    if kwota_za_kurs_minus and kwota_za_kurs_plus:
-        response['cena1'] = 'cena od <b>{0:.0f}</b> do <b>{1:.0f}</b> zł'.format(cena * kwota_za_kurs_minus / 100, cena * kwota_za_kurs_plus / 100)
-        response['cena2'] = 'cena od <b>{0:.0f}</b> do <b>{1:.0f}</b> zł'.format(cena_d * kwota_za_kurs_minus / 100, cena_d * kwota_za_kurs_plus / 100)
-    else:
-        response['cena1'] = 'cena około <b>{0:.0f}</b> zł'.format(cena)
-        response['cena2'] = 'cena około <b>{0:.0f}</b> zł'.format(cena_d)
-else:
-    response['cena1'] = '<b>Kursu nie można zrealizować całkowicie poza granicami miasta !</b>'
-    response['cena2'] = '<b>Kursu nie można zrealizować całkowicie poza granicami miasta !</b>'
-
-payload = json.JSONEncoder().encode(response)
-print(payload)
-#logger.debug('PRICE ->({})'.format(payload))
-
-#//file_object = open('/var/log/apache2/price.txt', 'a')
-#//file_object.write('hello')
-#//file_object.close()
