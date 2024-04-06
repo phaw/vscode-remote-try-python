@@ -1,0 +1,16 @@
+from OSM get   id
+
+
+http://polygons.openstreetmap.fr/index.py
+generate polygon
+get WTK
+
+
+format witg notepad++
+rename  ','    with   '\n'
+rename  '(.*) (.*)' with '$2,$1'
+
+
+encode polyline with:
+https://www.daftlogic.com/projects-online-csv-polyline-encoder.htm
+
